@@ -1,0 +1,99 @@
+<MyLayout>
+    capacity_slider_value: capacity_slider_value
+    quality_slider_value: quality_slider_value
+    BoxLayout:
+        id: main
+        orientation: "vertical"
+        size: root.width, root.height
+        BoxLayout:
+            id: top
+            orientation: "horizontal"
+            BoxLayout:
+                id: capacity
+                size_hint: 0.3, 1
+                orientation: "vertical"
+                Label:
+                    id: capacity_slider_label
+                    size_hint: 1, 0.1
+                    text: "Capacity"
+                    font_size: 32
+                Slider:
+                    min: 1
+                    max: 100
+                    step: 1
+                    orientation: "vertical"
+                    sensitivity: "handle"
+                    on_value: root.slide_capacity(*args)
+                Label:
+                    id: capacity_slider_value
+                    size_hint: 1, 0.1
+                    text: "0"
+                    font_size: 32
+            BoxLayout:
+                id: middle
+                orientation: "vertical"
+                BoxLayout:
+                    id: emergency
+                    orientation: "vertical"
+                    Label:
+                        size_hint: 1, 0.3
+                    BoxLayout:
+                        id: emergency
+                        size_hint: 1, 0.1
+                        orientation: "horizontal"
+                        Label:
+                            size_hint: 0.2, 1
+                        ToggleButton:
+                            text: "Emergency"
+                            size_hint: 0.6, 1
+                            font_size: 32
+                            always_release: True
+                            on_press: root.button_emergency()
+                        Label:
+                            size_hint: 0.2, 1
+                    Label:
+                        size_hint: 1, 0.2
+                BoxLayout:
+                    id: emergency
+                    orientation: "vertical"
+                    Label:
+                        id: cameras_button_label
+                        size_hint: 1, 0.1
+                        text: "Cameras"
+                        font_size: 32
+                    BoxLayout:
+                        id: emergency
+                        size_hint: 1, 0.1
+                        orientation: "horizontal"
+                        Label:
+                            size_hint: 0.4, 1
+                        Switch:
+                            active: True
+                            size_hint: 0.2, 1
+                            font_size: 32
+                            on_active: root.switch_cameras(self, self.active)
+                        Label:
+                            size_hint: 0.4, 1
+                    Label:
+                        size_hint: 1, 0.3
+            BoxLayout:
+                id: quality
+                size_hint: 0.3, 1
+                orientation: "vertical"
+                Label:
+                    id: quality_slider_label
+                    size_hint: 1, 0.1
+                    text: "Quality"
+                    font_size: 32
+                Slider:
+                    min: 1
+                    max: 100
+                    step: 1
+                    orientation: "vertical"
+                    sensitivity: "handle"
+                    on_value: root.slide_quality(*args)
+                Label:
+                    id: quality_slider_value
+                    size_hint: 1, 0.1
+                    text: "0"
+                    font_size: 32
