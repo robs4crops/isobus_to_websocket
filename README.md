@@ -1,4 +1,4 @@
-# Qualit assesment and Isobus to ROS2 communication
+# Quality assesment and Isobus to ROS2 communication
 
 ## Table of Contents
 - [Overview](#overview)
