@@ -1,0 +1,1192 @@
+Project Directory Structure:
+├── LICENSE.md
+├── environment.yml
+├── spraying
+│   ├── kinematics.py
+│   ├── kinematics_test.py
+│   └── trigger.py
+├── weeding
+│   ├── bridge.py
+│   ├── control.kv
+│   ├── emergency_db_flash.py
+│   ├── emergency_db_tim.py
+│   ├── emergency_raw.py
+│   ├── ip.py
+│   ├── kinematics.py
+│   ├── q_dbc_to_fc.py
+│   ├── q_raw_to_fc.py
+│   └── trigger.py
+
+
+File: 
+LICENSE.md
+Content: 
+Copyright (c) 2024 ROBS4CROPS
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+File: 
+environment.yml
+Content: 
+name: null
+
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  - jupyterlab
+  - pip
+
+
+File: 
+spraying/kinematics.py
+Content: 
+import os
+import time
+import can
+import cantools
+import roslibpy
+
+
+class Kinematics():
+    def __init__(self):
+        self.iters = 50
+        self.sleeper = 1
+        self.canbus = None
+        self.bridge = roslibpy.Ros(host="150.140.148.140", port=2233)
+        #self.bridge = roslibpy.Ros(host="10.42.0.1", port=9090)
+        self.dbc = """VERSION ""
+        BO_ 2365475321 GBSD: 8 Vector__XXX
+         SG_ GroundBasedMachineSpeed : 0|16@1+ (0.001,0) [0|64.255] "m/s" Vector__XXX
+        BO_ 2314732030 GNSSPositionRapidUpdate: 8 Bridge
+         SG_ Longitude : 32|32@1- (1E-007,0) [-180|180] "deg" Vector__XXX
+         SG_ Latitude : 0|32@1- (1E-007,0) [-90|90] "deg" Vector__XXX
+        BO_ 2362179326 PD: 14 Vector__XXX
+         SG_ AccumulatedTimeInWork m119 : 32|32@1- (1,0) [0|2147483647] "s" Vector__XXX
+        """
+
+        self.gbsd_id = 0x0CFE49F0
+        self.gbsd = cantools.db.load_string(self.dbc, 'dbc').get_message_by_name("GBSD")
+        self.gnss_id = 0x09F8011C
+        self.gnss = cantools.db.load_string(self.dbc, 'dbc').get_message_by_name("GNSSPositionRapidUpdate")
+        self.pd_id = 0x0CCB8583
+        self.pd = cantools.db.load_string(self.dbc, 'dbc').get_message_by_name("PD")
+
+        self.speed_topic = roslibpy.Topic(self.bridge, '/lsp3/speed', 'std_msgs/Float32')
+        self.longitude_topic = roslibpy.Topic(self.bridge, '/lsp3/longitude', 'std_msgs/Float32')
+        self.latitude_topic = roslibpy.Topic(self.bridge, '/lsp3/latitude', 'std_msgs/Float32')
+        self.odometry_topic = roslibpy.Topic(self.bridge, '/lsp3/odometry', 'nav_msgs/Odometry')
+
+        self.atiw_topic = roslibpy.Topic(self.bridge, '/lsp3/acumulated_time_in_work', 'std_msgs/Float32')
+
+    def send_can(self, message):
+        try:
+            self.canbus.send(message)
+        except can.CanError:
+            print("COULD NOT SEND THE MESSAGE")
+        print(message)
+
+    def recv_can(self, db, id, description):
+        data = None
+        i = 0
+        while(i < self.iters):
+            i = i + 1
+            try:
+                message = self.canbus.recv()
+                if message.arbitration_id == id:
+                    data = db.decode(message.data)
+                    print(data)
+            except can.CanError:
+                print("MESSAGE NOT RECIEVED")
+        if data == None: print("MESSAGE ", description, " NOT AVALIABLE")
+        return data
+
+    def recv_raw_can(self, id):
+        data = None
+        while(data == None):
+            try:
+                message = self.canbus.recv()
+                if message.arbitration_id == id:
+                    data = message
+            except can.CanError:
+                print("MESSAGE NOT RECIEVED")
+        print(data)
+        return data
+
+    def send_topic(self, topic, message):
+        topic.publish(roslibpy.Message(message))
+        print(message)
+ 
+    def sleep(self):
+        time.sleep(self.sleeper)
+
+
+def main(args=None):
+    kin = Kinematics()
+
+    while kin.canbus is None:
+        try:
+            print("CAN CONNECTED")
+            if os.name == 'nt':
+                kin.canbus = can.interface.Bus(channel=2, bustype='vector', app_name="CANoe")
+            else:
+                kin.canbus = can.interface.Bus(channel='vcan0', bustype='socketcan')
+        except:
+            print("CAN NOT CONNECTED")
+            time.sleep(5)
+
+    while not kin.bridge.is_connected:
+        try:
+            print("BRIDGE CONNECTED")
+            kin.bridge.run()
+        except:
+            print("BRIDGE NOT CONNECTED")
+            time.sleep(5)
+
+    while True:
+        gnss_message = kin.recv_can(kin.gnss, kin.gnss_id, "GNSS")
+        gbsd_message = kin.recv_can(kin.gbsd, kin.gbsd_id, "GBSD")
+        # pd_message = kin.recv_raw_can(kin.gbsd_id)
+
+        print("---")
+
+        if gbsd_message != None:
+            kin.send_topic(kin.speed_topic, {'data': float(gbsd_message["GroundBasedMachineSpeed"])})
+        if gnss_message != None:
+            kin.send_topic(kin.longitude_topic, {'data': float(gnss_message["Longitude"])})
+            kin.send_topic(kin.latitude_topic, {'data': float(gnss_message["Latitude"])})
+        #kin.send_topic(kin.atiw_topic, {'data': float(pd_message["AccumulatedTimeInWork"])})
+        if (gnss_message != None) and (gbsd_message != None):
+            kin.send_topic(kin.odometry_topic, {
+                "pose": {
+                    "pose": {
+                        "position": {"x": float(gnss_message["Longitude"]), "y": float(gnss_message["Latitude"])}
+                    }
+                },
+                "header": {"frame_id": "odom"}
+            })
+        # kin.sleep()
+if __name__ == '__main__':
+    main()
+
+
+File: 
+spraying/kinematics_test.py
+Content: 
+import os
+import time
+import can
+import cantools
+import roslibpy
+import binascii
+
+
+class Kinematics():
+    def __init__(self):
+        self.sleeper = 1
+        self.canbus = None
+        self.bridge = roslibpy.Ros(host="150.140.148.140", port=2233)
+        #self.bridge = roslibpy.Ros(host="10.42.0.1", port=9090)
+        self.dbc = """VERSION ""
+        BO_ 2365475321 GBSD: 8 Vector__XXX
+         SG_ GroundBasedMachineSpeed : 0|16@1+ (0.001,0) [0|64.255] "m/s" Vector__XXX
+        BO_ 2314732030 GNSSPositionRapidUpdate: 8 Bridge
+         SG_ Longitude : 32|32@1- (1E-007,0) [-180|180] "deg" Vector__XXX
+         SG_ Latitude : 0|32@1- (1E-007,0) [-90|90] "deg" Vector__XXX
+        BO_ 2362179326 PD: 14 Vector__XXX
+         SG_ AccumulatedTimeInWork m119 : 32|32@1- (1,0) [0|2147483647] "s" Vector__XXX
+        """
+
+        self.gbsd_id = 0x0CFE49F0
+        self.gbsd = cantools.db.load_string(self.dbc, 'dbc').get_message_by_name("GBSD")
+        self.gnss_id = 0x09F8011C
+        self.gnss = cantools.db.load_string(self.dbc, 'dbc').get_message_by_name("GNSSPositionRapidUpdate")
+        self.pd_id = 0x0CCB8583
+        self.pd = cantools.db.load_string(self.dbc, 'dbc').get_message_by_name("PD")
+
+        self.speed_topic = roslibpy.Topic(self.bridge, '/lsp3/speed', 'std_msgs/Float32')
+        self.longitude_topic = roslibpy.Topic(self.bridge, '/lsp3/longitude', 'std_msgs/Float32')
+        self.latitude_topic = roslibpy.Topic(self.bridge, '/lsp3/latitude', 'std_msgs/Float32')
+        self.odometry_topic = roslibpy.Topic(self.bridge, '/lsp3/odometry', 'nav_msgs/Odometry')
+
+        self.atiw_topic = roslibpy.Topic(self.bridge, '/lsp3/acumulated_time_in_work', 'std_msgs/Float32')
+
+    def send_can(self, message):
+        try:
+            self.canbus.send(message)
+        except can.CanError:
+            print("COULD NOT SEND THE MESSAGE")
+        print(message)
+ 
+    def recv_can(self, db, id):
+        data = None
+        while(data == None):
+            try:
+                message = self.canbus.recv()
+                if message.arbitration_id == id:
+                    data = db.decode(message.data)
+            except can.CanError:
+                print("MESSAGE NOT RECIEVED")
+        # print(data)
+        return data
+
+    def recv_raw_can(self, id):
+        data = None
+        while(data == None):
+            try:
+                message = self.canbus.recv()
+                if message.arbitration_id == id:
+                    data = message
+            except can.CanError:
+                print("MESSAGE NOT RECIEVED")
+        return data
+
+    def send_topic(self, topic, message):
+        topic.publish(roslibpy.Message(message))
+        # print(message)
+ 
+    def sleep(self):
+        time.sleep(self.sleeper)
+
+    def sub_bytes(self, i, start=0, end=0):
+        i_str = hex(i)[2:]  # skip 0x part
+        i_sub = i_str[-end * 2: len(i_str) - start * 2]  # get the bytes we need
+        return int(i_sub or '0', 16)
+
+    def access_bit(data, num):
+        base = int(num // 8)
+        shift = int(num % 8)
+        return (data[base] >> shift) & 0x1
+
+    def access_bits(data, start, end):
+        for x in (start, end):
+            base = int(x // 8)
+            shift = int(x % 8)
+            return (data[base] >> shift) & 0x1
+
+
+
+
+def main(args=None):
+    kin = Kinematics()
+
+    while kin.canbus is None:
+        try:
+            print("CAN CONNECTED")
+            if os.name == 'nt':
+                kin.canbus = can.interface.Bus(channel=2, bustype='vector', app_name="CANoe")
+            else:
+                kin.canbus = can.interface.Bus(channel='vcan0', bustype='socketcan')
+        except:
+            print("CAN NOT CONNECTED")
+            time.sleep(5)
+
+    # while not kin.bridge.is_connected:
+    #     try:
+    #         print("BRIDGE CONNECTED")
+    #         kin.bridge.run()
+    #     except:
+    #         print("BRIDGE NOT CONNECTED")
+    #         time.sleep(5)
+
+    while True:
+        gnss_message = kin.recv_can(kin.gnss, kin.gnss_id)
+        gbsd_message = kin.recv_can(kin.gbsd, kin.gbsd_id)
+        pd_message = kin.recv_raw_can(kin.pd_id)
+        hexd = pd_message.data.bin()
+        print(pd_message)
+        print(hexd)
+        # bytes_as_bits = ''.join(format(ord(bytes.fromhex(pd_message.data.hex())), '08b')[::-1] for byte in bytes)
+        # wanted = pd_message.data[4:].hex()
+        # print(wanted)
+        # pd_message = kin.recv_can(kin.pd, kin.pd_id)
+
+        # kin.send_topic(kin.speed_topic, {'data': float(gbsd_message["GroundBasedMachineSpeed"])})
+        # kin.send_topic(kin.longitude_topic, {'data': float(gnss_message["Longitude"])})
+        # kin.send_topic(kin.latitude_topic, {'data': float(gnss_message["Latitude"])})
+        #kin.send_topic(kin.atiw_topic, {'data': float(pd_message["AccumulatedTimeInWork"])})
+        # kin.send_topic(kin.odometry_topic, {
+        #     "pose": {
+        #         "pose": {
+        #             "position": {"x": float(gnss_message["Longitude"]), "y": float(gnss_message["Latitude"])}
+        #         }
+        #     },
+        #     "header": {"frame_id": "odom"}
+        # })
+        # kin.sleep()
+
+
+if __name__ == '__main__':
+    main()
+
+
+File: 
+spraying/trigger.py
+Content: 
+import argparse
+import roslibpy
+import time
+
+
+class Trigger():
+    def __init__(self):
+        self.sleeper = 1
+        self.bridge = roslibpy.Ros(host="150.140.148.140", port=2233)
+        self.trigger = roslibpy.Topic(self.bridge, "/lsp3/trigger_flag", 'std_msgs/Bool')
+
+    def send_topic(self, topic, message):
+        topic.publish(roslibpy.Message(message))
+        print(message)
+
+    def sleep(self):
+        time.sleep(self.sleeper)
+
+
+def main(args=None):
+    trig = Trigger()
+
+    while not trig.bridge.is_connected:
+        try:
+            print("BRIDGE CONNECTED")
+            trig.bridge.run()
+        except:
+            print("BRIDGE NOT CONNECTED")
+            time.sleep(5)
+
+    while True:
+        trig.send_topic(trig.trigger, {'data': False})
+        trig.sleep()
+
+
+if __name__ == '__main__':
+    main()
+
+
+File: 
+weeding/bridge.py
+Content: 
+import can
+import cantools
+import os
+import roslibpy
+import sys
+import time
+
+from kivy.app import App
+from kivy.uix.widget import Widget
+from kivy.lang.builder import Builder
+from kivy.clock import Clock
+
+clock = 0.5
+quality = 0
+capacity = 0
+emergency = False
+cameras = True
+
+
+client = roslibpy.Ros(host="150.140.148.140", port=2233)
+while not client.is_connected:
+    try:
+        client.run()
+    except:
+        time.sleep(5)
+        print("NOT CONNECTED")
+
+if os.name == 'nt':
+    bus = can.interface.Bus(channel=3, bustype='vector', app_name=None)
+else:
+    bus = can.interface.Bus(channel='vcan0', bustype='socketcan')
+
+dbc = """VERSION ""
+BO_ 2365194522 PD_Loader: 8 SEND
+  SG_ Quality : 0|32@1+ (1,0) [0|100] "%"  Loader
+  SG_ Capacity : 32|32@1+ (1,0) [0|4294967295] "mm2/s"  Loader
+BO_ 2566834709 DM1: 8 SEND
+  SG_ FlashRedStopLamp : 12|2@1+ (1,0) [0|3] "" Vector__XXX
+  SG_ FlashAmberWarningLamp : 10|2@1+ (1,0) [0|3] "" Vector__XXX
+BO_ 2365475321 GBSD: 8 Vector__XXX
+ SG_ GroundBasedMachineSpeed : 0|16@1+ (0.001,0) [0|64.255] "m/s" Vector__XXX
+BO_ 2314732030 GNSSPositionRapidUpdate: 8 Bridge
+ SG_ Longitude : 32|32@1- (1E-007,0) [-180|180] "deg" Vector__XXX
+ SG_ Latitude : 0|32@1- (1E-007,0) [-90|90] "deg" Vector__XXX
+"""
+
+dm1 = cantools.db.load_string(dbc, 'dbc').get_message_by_name("DM1")
+pdl = cantools.db.load_string(dbc, 'dbc').get_message_by_name("PD_Loader")
+gbsd = cantools.db.load_string(dbc, 'dbc').get_message_by_name("GBSD")
+gnss = cantools.db.load_string(dbc, 'dbc').get_message_by_name("GNSSPositionRapidUpdate")
+
+amber_topic = roslibpy.Topic(client, '/lsp1/camera_on_flag', 'std_msgs/Bool')
+red_topic = roslibpy.Topic(client, '/lsp1/emergency_stop_flag', 'std_msgs/Bool')
+capacity_topic = roslibpy.Topic(client, '/lsp1/capacity', 'std_msgs/Int16')
+quality_topic = roslibpy.Topic(client, '/lsp1/quality', 'std_msgs/Int16')
+longitude_topic = roslibpy.Topic(client, '/lsp1/longitude', 'std_msgs/Float32')
+latitude_topic = roslibpy.Topic(client, '/lsp1/latitude', 'std_msgs/Float32')
+speed_topic = roslibpy.Topic(client, '/lsp1/speed', 'std_msgs/Float32')
+odometry_topic = roslibpy.Topic(client, '/lsp1/odometry', 'nav_msgs/Odometry')
+
+r4c_topic = roslibpy.Topic(client, '/r4c_lsp1', 'r4c_interfaces/msg/R4C')
+
+
+def send2can(message):
+    try:
+        bus.send(message)
+        print(message)
+    except can.CanError:
+        print("Message NOT sent")
+
+
+def recv4can(db):
+    data = None
+    try:
+        message = bus.recv()
+        data = db.decode(message.data)
+    except can.CanError:
+        print("Message NOT sent")
+    return data
+
+
+def send2topic(topic, message):
+    topic.publish(roslibpy.Message(message))
+    print(message)
+
+
+def callback(dt):
+    print("CAN:")
+    send2can(can.Message(arbitration_id=pdl.frame_id, data=pdl.encode({'Capacity': capacity, 'Quality': quality})))
+    send2can(can.Message(arbitration_id=dm1.frame_id, data=dm1.encode({'FlashAmberWarningLamp': int(cameras), 'FlashRedStopLamp': int(emergency)})))
+
+    gnss_message = recv4can(gnss)
+    gbsd_message = recv4can(gbsd)
+
+    print("BRIDGE:")
+    send2topic(capacity_topic, {'data': capacity})
+    send2topic(quality_topic, {'data': quality})
+    send2topic(amber_topic, {'data': cameras})
+    send2topic(red_topic, {'data': emergency})
+    send2topic(speed_topic, {'data': float(gbsd_message["GroundBasedMachineSpeed"])})
+    send2topic(longitude_topic, {'data': float(gnss_message["Longitude"])})
+    send2topic(latitude_topic, {'data': float(gnss_message["Latitude"])})
+    send2topic(odometry_topic, {
+        "pose": {
+            "pose": {
+                "position": {"x": float(gnss_message["Longitude"]), "y": float(gnss_message["Latitude"])}
+            }
+        },
+        "header": {"frame_id": "odom"}
+    })
+    send2topic(r4c_topic, {"longitude": float(gnss_message["Longitude"]), "latitude": float(gnss_message["Latitude"]), "speed": int(gbsd_message["GroundBasedMachineSpeed"])})
+    print("-------\n")
+
+
+Builder.load_file("control.kv")
+
+
+class MyLayout(Widget):
+    def slide_capacity(self, *args):
+        global capacity
+        capacity = int(args[1])
+        self.capacity_slider_value.text = str(capacity)
+        # send2topic(capacity_topic, capacity)
+        # send2can(can.Message(arbitration_id=capacity_msg.frame_id, data=capacity_msg.encode({'Capacity':capacity})))
+
+    def slide_quality(self, *args):
+        global quality
+        quality = int(args[1])
+        self.quality_slider_value.text = str(quality)
+        # send2topic(quality_topic, quality)
+        # send2can(can.Message(arbitration_id=quality_msg.frame_id, data=quality_msg.encode({'Quality':quality})))
+
+    def switch_cameras(self, switchObject, switchValue):
+        global cameras
+        cameras = bool(switchValue)
+        # send2topic(amber_topic, cameras)
+        # send2can(can.Message(arbitration_id=amber_msg.frame_id, data=amber_msg.encode({'FlashAmberWarningLamp':int(cameras)})))
+ 
+    def button_emergency(self):
+        global emergency
+        emergency = not emergency
+        # send2topic(red_topic, emergency)
+        # send2can(can.Message(arbitration_id=red_msg.frame_id, data=red_msg.encode({'FlashRedStopLamp':int(emergency)})))
+
+class MyApp(App):
+    def build(self):
+        return MyLayout()
+
+if __name__ == "__main__":
+    Clock.schedule_interval(callback, clock)
+    MyApp().run()
+
+
+File: 
+weeding/control.kv
+Content: 
+<MyLayout>
+    capacity_slider_value: capacity_slider_value
+    quality_slider_value: quality_slider_value
+    BoxLayout:
+        id: main
+        orientation: "vertical"
+        size: root.width, root.height
+        BoxLayout:
+            id: top
+            orientation: "horizontal"
+            BoxLayout:
+                id: capacity
+                size_hint: 0.3, 1
+                orientation: "vertical"
+                Label:
+                    id: capacity_slider_label
+                    size_hint: 1, 0.1
+                    text: "Capacity"
+                    font_size: 32
+                Slider:
+                    min: 1
+                    max: 100
+                    step: 1
+                    orientation: "vertical"
+                    sensitivity: "handle"
+                    on_value: root.slide_capacity(*args)
+                Label:
+                    id: capacity_slider_value
+                    size_hint: 1, 0.1
+                    text: "0"
+                    font_size: 32
+            BoxLayout:
+                id: middle
+                orientation: "vertical"
+                BoxLayout:
+                    id: emergency
+                    orientation: "vertical"
+                    Label:
+                        size_hint: 1, 0.3
+                    BoxLayout:
+                        id: emergency
+                        size_hint: 1, 0.1
+                        orientation: "horizontal"
+                        Label:
+                            size_hint: 0.2, 1
+                        ToggleButton:
+                            text: "Emergency"
+                            size_hint: 0.6, 1
+                            font_size: 32
+                            always_release: True
+                            on_press: root.button_emergency()
+                        Label:
+                            size_hint: 0.2, 1
+                    Label:
+                        size_hint: 1, 0.2
+                BoxLayout:
+                    id: emergency
+                    orientation: "vertical"
+                    Label:
+                        id: cameras_button_label
+                        size_hint: 1, 0.1
+                        text: "Cameras"
+                        font_size: 32
+                    BoxLayout:
+                        id: emergency
+                        size_hint: 1, 0.1
+                        orientation: "horizontal"
+                        Label:
+                            size_hint: 0.4, 1
+                        Switch:
+                            active: True
+                            size_hint: 0.2, 1
+                            font_size: 32
+                            on_active: root.switch_cameras(self, self.active)
+                        Label:
+                            size_hint: 0.4, 1
+                    Label:
+                        size_hint: 1, 0.3
+            BoxLayout:
+                id: quality
+                size_hint: 0.3, 1
+                orientation: "vertical"
+                Label:
+                    id: quality_slider_label
+                    size_hint: 1, 0.1
+                    text: "Quality"
+                    font_size: 32
+                Slider:
+                    min: 1
+                    max: 100
+                    step: 1
+                    orientation: "vertical"
+                    sensitivity: "handle"
+                    on_value: root.slide_quality(*args)
+                Label:
+                    id: quality_slider_value
+                    size_hint: 1, 0.1
+                    text: "0"
+                    font_size: 32
+
+
+File: 
+weeding/emergency_db_flash.py
+Content: 
+import can
+import cantools
+import os
+import time
+
+if os.name == 'nt':
+    bus = can.interface.Bus(channel=2, bustype='vector', app_name="CANoe")
+else:
+    bus = can.interface.Bus(channel='vcan0', bustype='socketcan')
+
+
+dbc = """VERSION ""
+BO_ 2566834709 DM1: 8 SEND
+ SG_ FlashAmberWarningLamp : 10|2@1+ (1,0) [0|3] "" Vector__XXX
+ SG_ FlashRedStopLamp : 12|2@1+ (1,0) [0|3] "" Vector__XXX
+"""
+
+dm1 = cantools.db.load_string(dbc, 'dbc').get_message_by_name("DM1")
+
+def send2can(message):
+    print(can.bus.BusState)
+    try:
+        bus.send(message)
+        print(message)
+    except can.CanError:
+        print("COULD NOT SEND THE MESSAGE")
+
+sleeptime = 0.1
+while True:
+    send2can(can.Message(arbitration_id=dm1.frame_id, data=dm1.encode({'FlashAmberWarningLamp': 1, 'FlashRedStopLamp': 1})))
+    time.sleep(sleeptime)
+
+File: 
+weeding/emergency_db_tim.py
+Content: 
+import can
+import cantools
+import os
+import time
+
+if os.name == 'nt':
+    bus = can.interface.Bus(channel=2, bustype='vector', app_name="CANoe")
+else:
+    bus = can.interface.Bus(channel='vcan0', bustype='socketcan')
+
+
+dbc = """VERSION ""
+BO_ 2619670305 TIM21: 8 Vector__XXX
+ SG_ Process_Mulfunction : 8|8@1+ (1,0) [0|0] "" Vector__XXX
+"""
+
+tim_id = 0x419351061
+tim = cantools.db.load_string(dbc, 'dbc').get_message_by_name("TIM21")
+
+def send2can(message):
+    print(can.bus.BusState)
+    try:
+        bus.send(message)
+        print(message)
+    except can.CanError:
+        print("COULD NOT SEND THE MESSAGE")
+
+
+def recv_can(db, id):
+    data = None
+    for i in range(20):
+        try:
+            message = bus.recv()
+            if message.arbitration_id == id:
+                data = db.decode(message.data)
+                print(data)
+        except can.CanError:
+            print("MESSAGE NOT RECIEVED")
+    return data
+
+# tim_message = recv_can(tim, tim_id)
+# print(tim_message)
+
+sleeptime = 0.1
+while True:
+    send2can(can.Message(arbitration_id=tim.frame_id, data=tim.encode({'Process_Mulfunction': 1})))
+    time.sleep(sleeptime)
+
+File: 
+weeding/emergency_raw.py
+Content: 
+import can
+import os
+import time
+
+class Rosbridge():
+    def __init__(self):
+        self.sleeper = 1
+        self.bridge = roslibpy.Ros(host="10.147.17.52", port=2233)
+        self.trigger = roslibpy.Topic(self.bridge, "/lspn/trigger_flag", 'std_msgs/Bool')
+
+    def send_topic(self, topic, message):
+        topic.publish(roslibpy.Message(message))
+        print(message)
+
+    def sleep(self):
+        time.sleep(self.sleeper)
+
+
+def main(args=None):
+    trig = Trigger()
+
+
+if os.name == 'nt':
+    bus = can.interface.Bus(channel=2, bustype='vector', app_name="CANoe", )
+else:
+    bus = can.interface.Bus(channel='vcan0', bustype='socketcan')
+
+tim_id = 0x1C24FF21
+msg0 = can.Message(
+    arbitration_id=tim_id,
+    data=[0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+    is_extended_id=True
+)
+
+def send_can(message):
+    print(can.bus.BusState)
+    try:
+        bus.send(message)
+        print(message)
+    except can.CanError:
+        print("COULD NOT SEND THE MESSAGE")
+
+def recv_can(id):
+    data = None
+    try:
+        message = bus.recv(timeout=2)
+        if message is not None and message.arbitration_id == id:
+            data = message.data
+            return data
+    except can.CanError:
+        print("MESSAGE NOT RECIEVED")
+
+# tim_message = recv_can(tim_id)
+# print(tim_message)
+
+sleeptime = 0.1
+while True:
+    send_can(msg0)
+    time.sleep(sleeptime)
+
+File: 
+weeding/ip.py
+Content: 
+import time
+import socket
+import roslibpy
+
+class GetIP():
+    def __init__(self):
+        self.sleeper = 1
+        self.bridge = roslibpy.Ros(host="150.140.148.140", port=2233)
+        #self.bridge = roslibpy.Ros(host="10.42.0.1", port=9090)
+        self.ip = roslibpy.Topic(self.bridge, "/lsp1/ip", 'std_msgs/String')
+
+    def send_topic(self, topic, message):
+        topic.publish(roslibpy.Message(message))
+        print(message)
+
+    def sleep(self):
+        time.sleep(self.sleeper)
+
+    def extract_ip(self):
+        st = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            st.connect(('10.255.255.255', 1))
+            IP = st.getsockname()[0]
+        except Exception:
+            IP = '127.0.0.1'
+        finally:
+            st.close()
+        return IP
+
+
+def main(args=None):
+    trig = GetIP()
+
+    while not trig.bridge.is_connected:
+        try:
+            print("BRIDGE CONNECTED")
+            trig.bridge.run()
+        except:
+            print("BRIDGE NOT CONNECTED")
+            time.sleep(5)
+
+    while True:
+        trig.send_topic(trig.ip, {'data': trig.extract_ip()})
+        trig.sleep()
+
+
+if __name__ == '__main__':
+    main()
+
+
+File: 
+weeding/kinematics.py
+Content: 
+import os
+import time
+import can
+import cantools
+import roslibpy
+
+
+class Kinematics():
+    def __init__(self):
+        self.iters = 50
+        self.sleeper = 1
+        self.canbus = None
+        self.bridge = roslibpy.Ros(host="10.147.17.52", port=2233)
+        #self.bridge = roslibpy.Ros(host="10.42.0.1", port=9090)
+        self.dbc = """VERSION ""
+        BO_ 2365475321 GBSD: 8 Vector__XXX
+         SG_ GroundBasedMachineSpeed : 0|16@1+ (0.001,0) [0|64.255] "m/s" Vector__XXX
+        BO_ 2314732030 GNSSPositionRapidUpdate: 8 Bridge
+         SG_ Longitude : 32|32@1- (1E-007,0) [-180|180] "deg" Vector__XXX
+         SG_ Latitude : 0|32@1- (1E-007,0) [-90|90] "deg" Vector__XXX
+        """
+
+        self.gbsd_id = 0xFE4994
+        self.gbsd = cantools.db.load_string(self.dbc, 'dbc').get_message_by_name("GBSD")
+        self.gnss_id = 0x1F80194
+        self.gnss = cantools.db.load_string(self.dbc, 'dbc').get_message_by_name("GNSSPositionRapidUpdate")
+
+        self.speed_topic = roslibpy.Topic(self.bridge, '/lspn/speed', 'std_msgs/Float32')
+        self.longitude_topic = roslibpy.Topic(self.bridge, '/lspn/longitude', 'std_msgs/Float32')
+        self.latitude_topic = roslibpy.Topic(self.bridge, '/lspn/latitude', 'std_msgs/Float32')
+        # self.odometry_topic = roslibpy.Topic(self.bridge, '/lspn/odometry', 'nav_msgs/Odometry')
+        self.navsat_topic = roslibpy.Topic(self.bridge, '/lspn/Nav', 'sensor_msgs/NavSatFix')
+
+    def send_can(self, message):
+        try:
+            self.canbus.send(message)
+        except can.CanError:
+            print("COULD NOT SEND THE MESSAGE")
+        print(message)
+
+    def recv_can(self, db, id, description):
+        data = None
+        i = 0
+        while(i < self.iters):
+            i = i + 1
+            try:
+                message = self.canbus.recv()
+                if message.arbitration_id == id:
+                    data = db.decode(message.data)
+                    print(data)
+            except can.CanError:
+                print("MESSAGE NOT RECIEVED")
+        if data == None: print("MESSAGE ", description, " NOT AVALIABLE")
+        return data
+
+    def recv_raw_can(self, id):
+        data = None
+        while(data == None):
+            try:
+                message = self.canbus.recv()
+                if message.arbitration_id == id:
+                    data = message
+            except can.CanError:
+                print("MESSAGE NOT RECIEVED")
+        print(data)
+        return data
+
+    def send_topic(self, topic, message):
+        topic.publish(roslibpy.Message(message))
+        print(message)
+
+    def sleep(self):
+        time.sleep(self.sleeper)
+
+
+def main(args=None):
+    kin = Kinematics()
+
+    while kin.canbus is None:
+        try:
+            if os.name == 'nt':
+                kin.canbus = can.interface.Bus(channel=2, bustype='vector', app_name="CANoe")
+            else:
+                kin.canbus = can.interface.Bus(channel='vcan0', bustype='socketcan')
+            print("CAN CONNECTED")
+        except:
+            print("CAN NOT CONNECTED")
+            time.sleep(5)
+
+    while not kin.bridge.is_connected:
+        try:
+            kin.bridge.run()
+            print("BRIDGE CONNECTED")
+        except:
+            print("BRIDGE NOT CONNECTED")
+            time.sleep(5)
+
+    while True:
+        gnss_message = kin.recv_can(kin.gnss, kin.gnss_id, "GNSS")
+        gbsd_message = kin.recv_can(kin.gbsd, kin.gbsd_id, "GBSD")
+
+        print("---")
+
+        if gbsd_message != None:
+            kin.send_topic(kin.speed_topic, {'data': float(gbsd_message["GroundBasedMachineSpeed"])})
+        if gnss_message != None:
+            kin.send_topic(kin.longitude_topic, {'data': float(gnss_message["Longitude"])})
+            kin.send_topic(kin.latitude_topic, {'data': float(gnss_message["Latitude"])})
+        if (gnss_message != None) and (gbsd_message != None):
+            # kin.send_topic(kin.odometry_topic, {
+            #     "pose": {
+            #         "pose": {
+            #             "position": {"x": float(gnss_message["Longitude"]), "y": float(gnss_message["Latitude"])}
+            #         }
+            #     },
+            #     "header": {"frame_id": "odom"}
+            # })
+            kin.send_topic(kin.navsat_topic, {
+                "latitude": float(gnss_message["Latitude"]),
+                "longitude": float(gnss_message["Longitude"]),
+                "altitude": 0,
+                "header": {"frame_id": "odom"},
+            })
+        # kin.sleep()
+
+
+if __name__ == '__main__':
+    main()
+
+
+File: 
+weeding/q_dbc_to_fc.py
+Content: 
+import roslibpy
+import time
+import can
+import struct
+import cantools
+
+class Com():
+    def __init__(self):
+        self.canbus = None
+        self.iters = 50
+        self.sleeper = 1
+        self.bridge = roslibpy.Ros(host="10.147.17.52", port=2233)
+
+        self.dbc = """VERSION ""
+        BO_ 2365194536 PD_Loader: 8 SIM
+            SG_ Capacity : 32|32@1+ (1,0) [0|4294967295] "mm2/s"  Loader
+            SG_ Quality : 0|32@1+ (1,0) [0|100] "%"  Loader
+        """
+
+        self.id = 0xCFA011A
+        self.db = cantools.db.load_string(self.dbc, 'dbc').get_message_by_name("PD_Loader")
+        self.quality_topic = roslibpy.Topic(self.bridge, '/lspn/quality', 'std_msgs/Int16')
+        self.capacity_topic = roslibpy.Topic(self.bridge, '/lspn/capacity', 'std_msgs/Int16')
+
+    def send_topic(self, topic, message):
+        topic.publish(roslibpy.Message(message))
+
+    def sleep(self):
+        time.sleep(self.sleeper)
+    
+    def recv_can(self, db, id):
+        data = None
+        try:
+            i = 0
+            while(i < self.iters):
+                i = i + 1
+                message = self.canbus.recv()
+                if message.arbitration_id == id:
+                    data = db.decode(message.data)
+                    break
+        except can.CanError:
+            print("MESSAGE NOT RECIEVED")
+        return data
+ 
+    def send_topic(self, topic, message):
+        topic.publish(roslibpy.Message(message))
+        print(message)
+
+
+def main(args=None):
+    com = Com()
+    while not com.bridge.is_connected:
+        try:
+            print("BRIDGE CONNECTED")
+            com.bridge.run()
+        except:
+            print("BRIDGE NOT CONNECTED")
+            time.sleep(5)
+
+    while com.canbus is None:
+        try:
+            com.canbus = can.interface.Bus(channel=2, bustype='vector', app_name="CANoe", fd=True)
+            print("CAN CONNECTED")
+        except:
+            print("CAN NOT CONNECTED")
+            time.sleep(5)
+
+    while True:
+        message = com.recv_can(com.db, com.id)
+        if message is None:
+            print("MESSAGE NOT RECIEVED, LOOKING AGAIN...")
+            continue
+        quality = message['Quality']
+        capacity = message['Capacity']
+
+        print(f"Quality: {quality}")
+        com.send_topic(com.quality_topic, {'data': quality})
+        print(f"Capacity: {capacity}")
+        com.send_topic(com.capacity_topic, {'data': capacity})
+
+
+if __name__ == '__main__':
+    main()
+
+
+File: 
+weeding/q_raw_to_fc.py
+Content: 
+import roslibpy
+import time
+import can
+import struct
+
+
+"""
+BO_ 2365194536 PD_Loader: 8 SIM
+ SG_ Capacity : 32|32@1+ (1,0) [0|4294967295] "mm2/s"  Loader
+ SG_ Quality : 0|32@1+ (1,0) [0|100] "%"  Loader
+"""
+
+class Com():
+    def __init__(self):
+        self.canbus = None
+        self.sleeper = 1
+        self.bridge = roslibpy.Ros(host="10.147.17.52", port=2233)
+
+        # self.dbc = """VERSION ""
+        # BO_ 2365194536 PD_Loader: 8 SIM
+        #     SG_ Capacity : 32|32@1+ (1,0) [0|4294967295] "mm2/s"  Loader
+        #     SG_ Quality : 0|32@1+ (1,0) [0|100] "%"  Loader
+        # """
+
+        self.id = 0xCFA011A
+        self.quality_topic = roslibpy.Topic(self.bridge, '/lspn/quality', 'std_msgs/Int16')
+        self.capacity_topic = roslibpy.Topic(self.bridge, '/lspn/capacity', 'std_msgs/Int16')
+
+    def send_topic(self, topic, message):
+        topic.publish(roslibpy.Message(message))
+        print(message)
+
+    def sleep(self):
+        time.sleep(self.sleeper)
+    
+    def recv_can(self, id):
+        for i in range(20):
+            try:
+                message = self.canbus.recv()
+                if message.arbitration_id == id:
+                    return message
+            except can.CanError:
+                print("MESSAGE NOT RECIEVED")
+ 
+    def send_topic(self, topic, message):
+        topic.publish(roslibpy.Message(message))
+        print(message)
+
+
+def main(args=None):
+    com = Com()
+    while not com.bridge.is_connected:
+        try:
+            print("BRIDGE CONNECTED")
+            com.bridge.run()
+        except:
+            print("BRIDGE NOT CONNECTED")
+            time.sleep(5)
+
+    while com.canbus is None:
+        try:
+            com.canbus = can.interface.Bus(channel=2, bustype='vector', app_name="CANoe", fd=True)
+            print("CAN CONNECTED")
+        except:
+            print("CAN NOT CONNECTED")
+            time.sleep(5)
+
+    while True:
+        message = com.recv_can(com.id)
+        print(message)
+        # quality = struct.unpack('<H', message.data[2:4])[0]
+        # capacity = struct.unpack('<H', message.data[4:8])[0]
+        print(message["Quality"])
+        # com.send_topic(com.quality_topic, {'data': quality})
+        # com.send_topic(com.capacity_topic, {'data': capacity})
+
+
+if __name__ == '__main__':
+    main()
+
+
+File: 
+weeding/trigger.py
+Content: 
+import argparse
+import roslibpy
+import time
+
+
+class Trigger():
+    def __init__(self):
+        self.sleeper = 1
+        self.bridge = roslibpy.Ros(host="10.147.17.52", port=2233)
+        self.trigger = roslibpy.Topic(self.bridge, "/lspn/trigger_flag", 'std_msgs/Bool')
+
+    def send_topic(self, topic, message):
+        topic.publish(roslibpy.Message(message))
+        print(message)
+
+    def sleep(self):
+        time.sleep(self.sleeper)
+
+
+def main(args=None):
+    trig = Trigger()
+
+    while not trig.bridge.is_connected:
+        try:
+            print("BRIDGE CONNECTED")
+            trig.bridge.run()
+        except:
+            print("BRIDGE NOT CONNECTED")
+            time.sleep(5)
+
+    while True:
+        trig.send_topic(trig.trigger, {'data': True})
+        trig.sleep()
+
+
+if __name__ == '__main__':
+    main()
+
+
